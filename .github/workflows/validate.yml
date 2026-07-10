@@ -1,0 +1,25 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n entrypoint.sh
+      - run: python -m py_compile auth_proxy.py
+      - run: python -m json.tool railway.json > /dev/null
+      - run: docker build --tag tfas-hermes-ci .

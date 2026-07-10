@@ -2,6 +2,13 @@
 
 Deploy [Hermes Agent](https://hermes-agent.nousresearch.com/) to Railway with one click. Hermes is an open-source AI agent by Nous Research with tool use, memory, messaging platform integrations, and a web dashboard.
 
+## TFAS production contributors
+
+This repository is the source for the live TFAS Railway `hermes` service. Before changing it, read
+[AGENTS.md](AGENTS.md) and [How to collaborate and release Hermes on Railway](docs/HOW-TO-COLLABORATE-ON-RAILWAY.md).
+Production deploys are explicit: Railway watches only `ops/railway-release/**`, so normal code and
+documentation PRs do not interrupt the live Discord gateway or active sessions.
+
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/TEMPLATE_ID?referralCode=REFERRAL_CODE)
 
 ## Features

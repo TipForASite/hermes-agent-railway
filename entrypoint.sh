@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Railway executes this file directly; .gitattributes keeps it LF-only on Windows checkouts.
 set -e
 
 AUTO_UPDATE="${AUTO_UPDATE:-true}"

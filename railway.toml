@@ -1,6 +1,7 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
+watchPatterns = ["ops/railway-release/**"]
 
 [deploy]
 startCommand = "/entrypoint.sh"

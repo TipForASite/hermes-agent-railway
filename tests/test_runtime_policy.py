@@ -38,6 +38,18 @@ command_allowlist:
   - execute_code
 '''
 
+GATEWAY_FIXTURE = '''class GatewayRunner:
+    def _schedule_resume_pending_sessions(self, platform=None):
+        candidates = [
+            entry for entry in self.session_store._entries.values()
+                    if entry.resume_pending
+                    and not entry.suspended
+                    and entry.origin is not None
+                    and entry.resume_reason in self._AUTO_RESUME_REASONS
+                    and (platform is None or entry.origin.platform == platform)
+        ]
+'''
+
 
 class RuntimePolicyTests(unittest.TestCase):
     def setUp(self):
@@ -46,9 +58,13 @@ class RuntimePolicyTests(unittest.TestCase):
         self.hermes_root = self.root / "opt-hermes"
         self.hermes_home = self.root / "home-hermes"
         (self.hermes_root / "tools").mkdir(parents=True)
+        (self.hermes_root / "gateway").mkdir(parents=True)
         (self.hermes_home / runtime_policy.OBSOLETE_SKILL).mkdir(parents=True)
         (self.hermes_root / "tools/discord_tool.py").write_text(
             DISCORD_TOOL_FIXTURE, encoding="utf-8"
+        )
+        (self.hermes_root / "gateway/run.py").write_text(
+            GATEWAY_FIXTURE, encoding="utf-8"
         )
         (self.hermes_home / "config.yaml").write_text(CONFIG_FIXTURE, encoding="utf-8")
         (self.hermes_home / runtime_policy.OBSOLETE_SKILL / "SKILL.md").write_text(
@@ -65,6 +81,7 @@ class RuntimePolicyTests(unittest.TestCase):
             result,
             {
                 "discord_tool_patched": True,
+                "gateway_resume_patched": True,
                 "channel_prompts_patched": True,
                 "obsolete_worker_intake_removed": True,
             },
@@ -85,6 +102,12 @@ class RuntimePolicyTests(unittest.TestCase):
         )
         self.assertEqual(anchored["path"], "/channels/channel/messages/message/threads")
 
+        gateway = (self.hermes_root / "gateway/run.py").read_text()
+        self.assertIn(runtime_policy.PARENT_RESUME_POLICY_MARKER, gateway)
+        self.assertIn("entry.origin.platform == Platform.DISCORD", gateway)
+        self.assertIn('entry.origin.chat_type in ("group", "channel")', gateway)
+        self.assertIn('getattr(entry.origin, "prospective_thread_id", None)', gateway)
+
         config = (self.hermes_home / "config.yaml").read_text()
         self.assertIn("directly addressed conversation is the canonical work thread", config)
         self.assertIn("never create a parallel System Dev", config)
@@ -100,6 +123,7 @@ class RuntimePolicyTests(unittest.TestCase):
             second,
             {
                 "discord_tool_patched": False,
+                "gateway_resume_patched": False,
                 "channel_prompts_patched": False,
                 "obsolete_worker_intake_removed": False,
             },
@@ -116,6 +140,17 @@ class RuntimePolicyTests(unittest.TestCase):
         before = path.read_text(encoding="utf-8")
         runtime_policy.check_discord_tool_compatibility(path)
         self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+        gateway_path = self.hermes_root / "gateway/run.py"
+        gateway_before = gateway_path.read_text(encoding="utf-8")
+        runtime_policy.check_gateway_compatibility(gateway_path)
+        self.assertEqual(gateway_path.read_text(encoding="utf-8"), gateway_before)
+
+    def test_gateway_resume_drift_fails_closed(self):
+        path = self.hermes_root / "gateway/run.py"
+        path.write_text("class GatewayRunner:\n    pass\n", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "startup-resume implementation changed"):
+            runtime_policy.patch_gateway_resume(path)
 
 
 if __name__ == "__main__":

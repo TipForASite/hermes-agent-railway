@@ -13,6 +13,7 @@ import tempfile
 
 
 THREAD_POLICY_MARKER = "# TFAS_CANONICAL_THREAD_POLICY"
+PARENT_RESUME_POLICY_MARKER = "# TFAS_DISCORD_PARENT_RESUME_POLICY"
 OBSOLETE_SKILL = Path("skills/tfas-ops/discord-worker-message-intake")
 
 FACTORY_CHANNEL_ID = "1524901024203276550"
@@ -79,6 +80,26 @@ _MANIFEST_NEW = (
     '"create one thread; omit message_id only for a fresh standalone TFAS client thread"),'
 )
 
+_AUTO_RESUME_NEEDLE = '''                    and entry.origin is not None
+                    and entry.resume_reason in self._AUTO_RESUME_REASONS
+'''
+
+_AUTO_RESUME_REPLACEMENT = '''                    and entry.origin is not None
+                    # TFAS_DISCORD_PARENT_RESUME_POLICY
+                    # Never synthesize a restart-recovery turn into a bare Discord parent
+                    # channel. Real user messages can still resume that session, while actual
+                    # and prospective thread lanes retain automatic interruption recovery.
+                    and not (
+                        entry.origin.platform == Platform.DISCORD
+                        and entry.origin.chat_type in ("group", "channel")
+                        and not (
+                            entry.origin.thread_id
+                            or getattr(entry.origin, "prospective_thread_id", None)
+                        )
+                    )
+                    and entry.resume_reason in self._AUTO_RESUME_REASONS
+'''
+
 
 def _atomic_write(path: Path, content: str) -> None:
     """Replace a text file without exposing a partially written policy."""
@@ -141,6 +162,30 @@ def check_discord_tool_compatibility(path: Path, *, content: str | None = None) 
         )
 
 
+def patch_gateway_resume(path: Path) -> bool:
+    """Prevent startup recovery from speaking in a bare Discord parent channel."""
+
+    content = path.read_text(encoding="utf-8")
+    if PARENT_RESUME_POLICY_MARKER in content:
+        return False
+    check_gateway_compatibility(path, content=content)
+    content = content.replace(_AUTO_RESUME_NEEDLE, _AUTO_RESUME_REPLACEMENT, 1)
+    _atomic_write(path, content)
+    return True
+
+
+def check_gateway_compatibility(path: Path, *, content: str | None = None) -> None:
+    """Fail a build/release if the upstream startup-resume loop drifts."""
+
+    source = content if content is not None else path.read_text(encoding="utf-8")
+    if PARENT_RESUME_POLICY_MARKER in source:
+        return
+    if _AUTO_RESUME_NEEDLE not in source:
+        raise RuntimeError(
+            f"Hermes gateway startup-resume implementation changed; policy anchor missing in {path}"
+        )
+
+
 def _replace_channel_prompt(content: str, channel_id: str, prompt: str) -> tuple[str, bool]:
     pattern = re.compile(
         rf"^    '{re.escape(channel_id)}':.*?"
@@ -189,6 +234,7 @@ def remove_obsolete_worker_intake(hermes_home: Path) -> bool:
 def reconcile(hermes_root: Path, hermes_home: Path) -> dict[str, bool]:
     return {
         "discord_tool_patched": patch_discord_tool(hermes_root / "tools/discord_tool.py"),
+        "gateway_resume_patched": patch_gateway_resume(hermes_root / "gateway/run.py"),
         "channel_prompts_patched": patch_channel_prompts(hermes_home / "config.yaml"),
         "obsolete_worker_intake_removed": remove_obsolete_worker_intake(hermes_home),
     }
@@ -207,7 +253,12 @@ def main() -> None:
 
     if args.check:
         check_discord_tool_compatibility(args.hermes_root / "tools/discord_tool.py")
-        print(json.dumps({"ok": True, "discord_tool_compatible": True}, sort_keys=True))
+        check_gateway_compatibility(args.hermes_root / "gateway/run.py")
+        print(json.dumps({
+            "ok": True,
+            "discord_tool_compatible": True,
+            "gateway_resume_compatible": True,
+        }, sort_keys=True))
         return
 
     result = reconcile(args.hermes_root, args.hermes_home)

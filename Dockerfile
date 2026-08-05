@@ -22,6 +22,8 @@ RUN mkdir -p /root/.hermes/{cron,sessions,logs,memories,skills,pairing,hooks,ima
     && touch /root/.hermes/.env
 
 COPY auth_proxy.py /auth_proxy.py
+COPY runtime_policy.py /runtime_policy.py
+RUN python /runtime_policy.py --check --hermes-root /opt/hermes-agent
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

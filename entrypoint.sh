@@ -7,6 +7,9 @@ AUTO_UPDATE="${AUTO_UPDATE:-true}"
 if [ "$AUTO_UPDATE" = "true" ]; then
   echo "Checking for Hermes updates..."
   cd /opt/hermes-agent
+  # runtime_policy.py patches this exact upstream file after update. Restore only that
+  # container-owned patch before pulling so a later upstream update is never blocked.
+  git restore -- tools/discord_tool.py
   if git pull --recurse-submodules 2>&1 | grep -v 'Already up to date'; then
     echo "Updating dependencies..."
     VIRTUAL_ENV=/opt/hermes-agent/venv uv pip install -e ".[all]" --quiet
@@ -16,9 +19,10 @@ if [ "$AUTO_UPDATE" = "true" ]; then
   fi
 fi
 
-# This profile artifact described Workers-owned Discord reply lanes that no longer exist.
-# Remove it after upstream sync and before the gateway builds its active skill catalog.
-rm -rf -- /root/.hermes/skills/tfas-ops/discord-worker-message-intake
+# Reconcile TFAS routing after upstream sync and before the gateway builds its tool/skill catalog.
+# This keeps native mention-to-thread behavior, but prevents an agent turn from opening an
+# unanchored shadow thread in another channel.
+python /runtime_policy.py
 
 hermes dashboard --host 127.0.0.1 --port 9119 --no-open &
 

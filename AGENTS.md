@@ -29,7 +29,8 @@ service `hermes`, environment `production`, with persistent state mounted at `/r
 
 ```powershell
 bash -n entrypoint.sh
-python -m py_compile auth_proxy.py
+python -m py_compile auth_proxy.py runtime_policy.py
+python -m unittest discover -s tests -v
 python -m json.tool railway.json > $null
 docker build --tag tfas-hermes-local .
 ```

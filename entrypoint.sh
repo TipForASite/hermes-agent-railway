@@ -16,6 +16,10 @@ if [ "$AUTO_UPDATE" = "true" ]; then
   fi
 fi
 
+# This profile artifact described Workers-owned Discord reply lanes that no longer exist.
+# Remove it after upstream sync and before the gateway builds its active skill catalog.
+rm -rf -- /root/.hermes/skills/tfas-ops/discord-worker-message-intake
+
 hermes dashboard --host 127.0.0.1 --port 9119 --no-open &
 
 exec python /auth_proxy.py

@@ -13,6 +13,7 @@ import tempfile
 
 
 THREAD_POLICY_MARKER = "# TFAS_CANONICAL_THREAD_POLICY"
+PARENT_RESUME_POLICY_MARKER = "# TFAS_DISCORD_PARENT_RESUME_POLICY"
 OBSOLETE_SKILL = Path("skills/tfas-ops/discord-worker-message-intake")
 
 FACTORY_CHANNEL_ID = "1524901024203276550"
@@ -24,8 +25,9 @@ FACTORY_PROMPT = (
     "addressed conversation is the canonical work thread. If the work requires an engineering "
     "change, perform and narrate it from that origin thread; never create a parallel System Dev "
     "or engineering thread. If the operator explicitly asks for a client thread, create exactly "
-    "one thread anchored to an existing message in that client's channel, then keep relevant "
-    "progress there. Do not also create or rename another thread. Give concise actionable status, "
+    "one fresh standalone thread in that client's channel, then keep relevant progress there. "
+    "Never attach it to, reuse, or rename an older Workers message or thread. Do not also create "
+    "or rename another thread. Give concise actionable status, "
     "escalate money or legality ambiguity, and never type the human gate words in build channels."
 )
 
@@ -34,8 +36,9 @@ INTERNAL_PROMPT = (
     "any mutation and recall client memory before judgment calls. The directly addressed "
     "conversation is the canonical work thread. Keep any resulting engineering work in that "
     "origin thread; never create a parallel System Dev or engineering thread. If the operator "
-    "explicitly asks for a client thread, create exactly one thread anchored to an existing "
-    "message in that client's channel and do not create or rename any other thread."
+    "explicitly asks for a client thread, create exactly one fresh standalone thread in that "
+    "client's channel. Never attach it to, reuse, or rename an older Workers message or thread, "
+    "and do not create or rename any other thread."
 )
 
 _CREATE_THREAD_NEEDLE = '''    """Create a thread in a channel."""
@@ -44,18 +47,27 @@ _CREATE_THREAD_NEEDLE = '''    """Create a thread in a channel."""
 
 _CREATE_THREAD_REPLACEMENT = '''    """Create a thread in a channel."""
     # TFAS_CANONICAL_THREAD_POLICY
-    # Native mention-to-thread routing owns standalone threads. Agent-created cross-channel
-    # threads must be anchored to an existing message so one request cannot create a shadow
-    # engineering thread in a second channel.
+    # Native mention-to-thread routing owns internal rooms. The agent may create a standalone
+    # cross-channel thread only in a real TFAS client channel; this keeps the thread Hermes-owned
+    # instead of attaching it to an old Workers card, while blocking shadow engineering threads.
     if not message_id:
-        return json.dumps({
-            "success": False,
-            "error": "unanchored_thread_creation_disabled",
-            "hint": (
-                "Keep engineering work in the current origin thread. To create the one requested "
-                "client thread, provide that channel's existing message_id as the anchor."
-            ),
-        })
+        target = _discord_request("GET", f"/channels/{channel_id}", token)
+        target_name = str(target.get("name") or "").lower()
+        target_topic = str(target.get("topic") or "").lower()
+        is_tfas_client_channel = (
+            target.get("type") == 0
+            and target_name.startswith("tfas-")
+            and "lead " in target_topic
+        )
+        if not is_tfas_client_channel:
+            return json.dumps({
+                "success": False,
+                "error": "standalone_thread_limited_to_client_channels",
+                "hint": (
+                    "Keep engineering work in the current origin thread. Standalone tool-created "
+                    "threads are allowed only in a TFAS client channel."
+                ),
+            })
     if message_id:
 '''
 
@@ -64,9 +76,29 @@ _MANIFEST_OLD = (
     '"create a public thread; optional message_id anchor"),'
 )
 _MANIFEST_NEW = (
-    '("create_thread", "(channel_id, name, message_id)", '
-    '"create one public thread anchored to an existing message; message_id is required"),'
+    '("create_thread", "(channel_id, name[, message_id])", '
+    '"create one thread; omit message_id only for a fresh standalone TFAS client thread"),'
 )
+
+_AUTO_RESUME_NEEDLE = '''                    and entry.origin is not None
+                    and entry.resume_reason in self._AUTO_RESUME_REASONS
+'''
+
+_AUTO_RESUME_REPLACEMENT = '''                    and entry.origin is not None
+                    # TFAS_DISCORD_PARENT_RESUME_POLICY
+                    # Never synthesize a restart-recovery turn into a bare Discord parent
+                    # channel. Real user messages can still resume that session, while actual
+                    # and prospective thread lanes retain automatic interruption recovery.
+                    and not (
+                        entry.origin.platform == Platform.DISCORD
+                        and entry.origin.chat_type in ("group", "channel")
+                        and not (
+                            entry.origin.thread_id
+                            or getattr(entry.origin, "prospective_thread_id", None)
+                        )
+                    )
+                    and entry.resume_reason in self._AUTO_RESUME_REASONS
+'''
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -87,7 +119,7 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def patch_discord_tool(path: Path) -> bool:
-    """Require an existing-message anchor for agent-invoked thread creation."""
+    """Limit standalone agent-created threads to genuine TFAS client channels."""
 
     content = path.read_text(encoding="utf-8")
     changed = False
@@ -127,6 +159,30 @@ def check_discord_tool_compatibility(path: Path, *, content: str | None = None) 
     if _MANIFEST_OLD not in source:
         raise RuntimeError(
             f"Hermes Discord action manifest changed; policy description missing in {path}"
+        )
+
+
+def patch_gateway_resume(path: Path) -> bool:
+    """Prevent startup recovery from speaking in a bare Discord parent channel."""
+
+    content = path.read_text(encoding="utf-8")
+    if PARENT_RESUME_POLICY_MARKER in content:
+        return False
+    check_gateway_compatibility(path, content=content)
+    content = content.replace(_AUTO_RESUME_NEEDLE, _AUTO_RESUME_REPLACEMENT, 1)
+    _atomic_write(path, content)
+    return True
+
+
+def check_gateway_compatibility(path: Path, *, content: str | None = None) -> None:
+    """Fail a build/release if the upstream startup-resume loop drifts."""
+
+    source = content if content is not None else path.read_text(encoding="utf-8")
+    if PARENT_RESUME_POLICY_MARKER in source:
+        return
+    if _AUTO_RESUME_NEEDLE not in source:
+        raise RuntimeError(
+            f"Hermes gateway startup-resume implementation changed; policy anchor missing in {path}"
         )
 
 
@@ -178,6 +234,7 @@ def remove_obsolete_worker_intake(hermes_home: Path) -> bool:
 def reconcile(hermes_root: Path, hermes_home: Path) -> dict[str, bool]:
     return {
         "discord_tool_patched": patch_discord_tool(hermes_root / "tools/discord_tool.py"),
+        "gateway_resume_patched": patch_gateway_resume(hermes_root / "gateway/run.py"),
         "channel_prompts_patched": patch_channel_prompts(hermes_home / "config.yaml"),
         "obsolete_worker_intake_removed": remove_obsolete_worker_intake(hermes_home),
     }
@@ -196,7 +253,12 @@ def main() -> None:
 
     if args.check:
         check_discord_tool_compatibility(args.hermes_root / "tools/discord_tool.py")
-        print(json.dumps({"ok": True, "discord_tool_compatible": True}, sort_keys=True))
+        check_gateway_compatibility(args.hermes_root / "gateway/run.py")
+        print(json.dumps({
+            "ok": True,
+            "discord_tool_compatible": True,
+            "gateway_resume_compatible": True,
+        }, sort_keys=True))
         return
 
     result = reconcile(args.hermes_root, args.hermes_home)

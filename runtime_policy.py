@@ -24,8 +24,9 @@ FACTORY_PROMPT = (
     "addressed conversation is the canonical work thread. If the work requires an engineering "
     "change, perform and narrate it from that origin thread; never create a parallel System Dev "
     "or engineering thread. If the operator explicitly asks for a client thread, create exactly "
-    "one thread anchored to an existing message in that client's channel, then keep relevant "
-    "progress there. Do not also create or rename another thread. Give concise actionable status, "
+    "one fresh standalone thread in that client's channel, then keep relevant progress there. "
+    "Never attach it to, reuse, or rename an older Workers message or thread. Do not also create "
+    "or rename another thread. Give concise actionable status, "
     "escalate money or legality ambiguity, and never type the human gate words in build channels."
 )
 
@@ -34,8 +35,9 @@ INTERNAL_PROMPT = (
     "any mutation and recall client memory before judgment calls. The directly addressed "
     "conversation is the canonical work thread. Keep any resulting engineering work in that "
     "origin thread; never create a parallel System Dev or engineering thread. If the operator "
-    "explicitly asks for a client thread, create exactly one thread anchored to an existing "
-    "message in that client's channel and do not create or rename any other thread."
+    "explicitly asks for a client thread, create exactly one fresh standalone thread in that "
+    "client's channel. Never attach it to, reuse, or rename an older Workers message or thread, "
+    "and do not create or rename any other thread."
 )
 
 _CREATE_THREAD_NEEDLE = '''    """Create a thread in a channel."""
@@ -44,18 +46,27 @@ _CREATE_THREAD_NEEDLE = '''    """Create a thread in a channel."""
 
 _CREATE_THREAD_REPLACEMENT = '''    """Create a thread in a channel."""
     # TFAS_CANONICAL_THREAD_POLICY
-    # Native mention-to-thread routing owns standalone threads. Agent-created cross-channel
-    # threads must be anchored to an existing message so one request cannot create a shadow
-    # engineering thread in a second channel.
+    # Native mention-to-thread routing owns internal rooms. The agent may create a standalone
+    # cross-channel thread only in a real TFAS client channel; this keeps the thread Hermes-owned
+    # instead of attaching it to an old Workers card, while blocking shadow engineering threads.
     if not message_id:
-        return json.dumps({
-            "success": False,
-            "error": "unanchored_thread_creation_disabled",
-            "hint": (
-                "Keep engineering work in the current origin thread. To create the one requested "
-                "client thread, provide that channel's existing message_id as the anchor."
-            ),
-        })
+        target = _discord_request("GET", f"/channels/{channel_id}", token)
+        target_name = str(target.get("name") or "").lower()
+        target_topic = str(target.get("topic") or "").lower()
+        is_tfas_client_channel = (
+            target.get("type") == 0
+            and target_name.startswith("tfas-")
+            and "lead " in target_topic
+        )
+        if not is_tfas_client_channel:
+            return json.dumps({
+                "success": False,
+                "error": "standalone_thread_limited_to_client_channels",
+                "hint": (
+                    "Keep engineering work in the current origin thread. Standalone tool-created "
+                    "threads are allowed only in a TFAS client channel."
+                ),
+            })
     if message_id:
 '''
 
@@ -64,8 +75,8 @@ _MANIFEST_OLD = (
     '"create a public thread; optional message_id anchor"),'
 )
 _MANIFEST_NEW = (
-    '("create_thread", "(channel_id, name, message_id)", '
-    '"create one public thread anchored to an existing message; message_id is required"),'
+    '("create_thread", "(channel_id, name[, message_id])", '
+    '"create one thread; omit message_id only for a fresh standalone TFAS client thread"),'
 )
 
 
@@ -87,7 +98,7 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def patch_discord_tool(path: Path) -> bool:
-    """Require an existing-message anchor for agent-invoked thread creation."""
+    """Limit standalone agent-created threads to genuine TFAS client channels."""
 
     content = path.read_text(encoding="utf-8")
     changed = False

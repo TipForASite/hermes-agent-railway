@@ -8,6 +8,11 @@ import runtime_policy
 
 DISCORD_TOOL_FIXTURE = '''import json
 
+def _discord_request(method, path, token):
+    if path.endswith("/client-channel"):
+        return {"type": 0, "name": "tfas-acme", "topic": "TFAS client — lead 11111111-1111-1111-1111-111111111111"}
+    return {"type": 0, "name": "system-dev", "topic": "Factory engineering"}
+
 def _create_thread(
     token: str, channel_id: str, name: str,
     message_id=None,
@@ -53,7 +58,7 @@ class RuntimePolicyTests(unittest.TestCase):
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def test_reconcile_enforces_single_anchored_thread_policy(self):
+    def test_reconcile_enforces_single_client_thread_policy(self):
         result = runtime_policy.reconcile(self.hermes_root, self.hermes_home)
 
         self.assertEqual(
@@ -67,12 +72,14 @@ class RuntimePolicyTests(unittest.TestCase):
         discord_tool = (self.hermes_root / "tools/discord_tool.py").read_text()
         self.assertIn(runtime_policy.THREAD_POLICY_MARKER, discord_tool)
         self.assertIn('if not message_id:', discord_tool)
-        self.assertIn('"unanchored_thread_creation_disabled"', discord_tool)
-        self.assertIn("message_id is required", discord_tool)
+        self.assertIn('"standalone_thread_limited_to_client_channels"', discord_tool)
+        self.assertIn("omit message_id only for a fresh standalone TFAS client thread", discord_tool)
         namespace = {}
         exec(compile(discord_tool, "discord_tool.py", "exec"), namespace)
-        rejected = json.loads(namespace["_create_thread"]("token", "channel", "name"))
-        self.assertEqual(rejected["error"], "unanchored_thread_creation_disabled")
+        rejected = json.loads(namespace["_create_thread"]("token", "system-dev", "name"))
+        self.assertEqual(rejected["error"], "standalone_thread_limited_to_client_channels")
+        standalone = json.loads(namespace["_create_thread"]("token", "client-channel", "name"))
+        self.assertEqual(standalone["path"], "/channels/client-channel/threads")
         anchored = json.loads(
             namespace["_create_thread"]("token", "channel", "name", message_id="message")
         )
@@ -81,7 +88,8 @@ class RuntimePolicyTests(unittest.TestCase):
         config = (self.hermes_home / "config.yaml").read_text()
         self.assertIn("directly addressed conversation is the canonical work thread", config)
         self.assertIn("never create a parallel System Dev", config)
-        self.assertIn("create exactly one thread anchored to an existing message", config)
+        self.assertIn("create exactly one fresh standalone thread", config)
+        self.assertIn("Never attach it to, reuse, or rename an older Workers message", config)
         self.assertIn("command_allowlist:", config)
         self.assertFalse((self.hermes_home / runtime_policy.OBSOLETE_SKILL).exists())
 
